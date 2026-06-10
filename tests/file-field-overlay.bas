@@ -1,0 +1,8 @@
+10 OPEN "c4.dat" FOR RANDOM AS #1 LEN=8
+20 FIELD #1, 8 AS W$
+30 FIELD #1, 4 AS A$, 4 AS B$
+40 LSET W$="ABCDEFGH"
+50 PUT #1, 1
+60 GET #1, 1
+70 PRINT "W=[";W$;"] A=[";A$;"] B=[";B$;"]"
+80 CLOSE

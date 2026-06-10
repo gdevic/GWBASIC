@@ -1,0 +1,1 @@
+10 OPEN "x.dat" FOR OUTPUT AS #0

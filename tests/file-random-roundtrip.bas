@@ -1,0 +1,7 @@
+10 OPEN "R",#1,"t.dat",24
+20 FIELD #1, 8 AS N$, 16 AS A$
+30 LSET N$=MKD$(3.25): LSET A$="REC"
+40 PUT #1,1
+50 GET #1,1
+60 PRINT CVD(N$);"[";A$;"]"
+70 CLOSE: KILL "t.dat"

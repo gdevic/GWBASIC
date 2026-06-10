@@ -1,0 +1,2 @@
+10 DATA abc
+20 READ N

@@ -1,0 +1,24 @@
+ 64  60000 -4 
+Ok
+Division by zero
+ 1.701412E+38 
+Ok
+Overflow
+ 1.701412E+38 
+Ok
+Division by zero
+ 32767  1 -1 
+Ok
+Division by zero
+ 1.701412E+38 
+Ok
+ 1234  123456789012 
+Ok
+FFFF 10
+Ok
+ 2  4 -3 -2 
+Ok
+ 255 -32768  63 
+Ok
+-1 -1 -6 -7 
+Ok

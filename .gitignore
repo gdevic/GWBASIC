@@ -1,0 +1,10 @@
+# build artifact
+basic
+# locally extracted ncurses headers (see Makefile for how to fetch them)
+.deps/extracted/
+.deps/*.deb
+# personal Claude Code permissions
+.claude/settings.local.json
+# runtime droppings
+printer.out
+*.dat

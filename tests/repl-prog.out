@@ -1,0 +1,13 @@
+Ok
+10 PRINT "A"
+20 GOTO 40
+30 PRINT "C"
+40 PRINT "E"
+Ok
+Ok
+Break in 20
+Ok
+X= 5 
+Ok
+Syntax error
+Ok

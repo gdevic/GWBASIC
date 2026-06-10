@@ -1,0 +1,4 @@
+10 A=5: B$="OLD"
+20 INPUT A
+30 INPUT B$
+40 PRINT A;"[";B$;"]"

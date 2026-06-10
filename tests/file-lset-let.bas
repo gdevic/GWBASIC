@@ -1,0 +1,8 @@
+10 OPEN "d1.dat" FOR RANDOM AS #1 LEN=4
+20 FIELD #1, 4 AS A$
+30 LSET A$="GOOD"
+40 A$="BAD"
+50 PUT #1, 1
+60 GET #1, 1
+70 PRINT "[";A$;"]"
+80 CLOSE: KILL "d1.dat"

@@ -1,0 +1,8 @@
+10 DIM A$(3)
+20 OPEN "c5.dat" FOR RANDOM AS #1 LEN=8
+30 FIELD #1, 4 AS A$(1), 4 AS A$(2)
+40 LSET A$(1)="AB"
+50 PUT #1,1
+60 GET #1,1
+70 PRINT "[";A$(1);"][";A$(2);"]"
+80 CLOSE
