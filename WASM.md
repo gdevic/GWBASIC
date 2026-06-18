@@ -15,19 +15,35 @@ cannot be invoked from WSL — see "Toolchain" below).
 - [x] Investigated the codebase; the screen layer is cleanly abstracted behind a
       `Screen` virtual base class, so a WASM backend slots in alongside
       `CursesScreen` / `PlainScreen` without touching the interpreter core.
-- [x] Confirmed the native build still uses ncurses; WASM build must compile out
+- [x] Confirmed the native build still uses ncurses; WASM build compiles out
       ncurses entirely.
-- [ ] **PENDING — not yet written:** `WasmScreen` backend in `basic.cpp`.
-- [ ] **PENDING:** `#ifndef __EMSCRIPTEN__` guards around `CursesScreen`, the
-      `<ncurses.h>` include, and the curses bits of `stmtShell`.
-- [ ] **PENDING:** `main()` branch to launch `WasmScreen` under `__EMSCRIPTEN__`.
-- [ ] **PENDING:** `shell.html` (canvas + C64 theme + keyboard → key queue + JS
-      renderer) and a tiny JS glue layer.
-- [ ] **PENDING:** first successful `emcc` build + browser smoke test.
+- [x] **DONE:** `WasmScreen` backend in `basic.cpp` (mirrors `CursesScreen`'s
+      shadow/attr/wrapped buffers; renders the 80×25 grid via `EM_JS js_present`;
+      keys via a JS queue; blocking `waitKey` via `EM_ASYNC_JS` + Asyncify;
+      `breakPending` throttles `emscripten_sleep(0)` to ~60 Hz).
+- [x] **DONE:** `#ifndef __EMSCRIPTEN__` guards around `<ncurses.h>`,
+      `CursesScreen`, the `using EditorScreen` alias, the `stmtShell` curses path
+      (browser raises err 73), and `stmtColor`'s `dynamic_cast` (now to
+      `EditorScreen`, which covers both backends).
+- [x] **DONE:** `main()` `__EMSCRIPTEN__` branch builds `WasmScreen` + `Editor`,
+      skips `signal()`.
+- [x] **DONE:** `shell.html` — `<canvas>`, C64 palette/border, blinking block
+      cursor, CP437→Unicode table mirroring `cp437[]`, `keydown`→packed-key queue,
+      `basicPresent/basicPollKey/basicWaitKey/basicBeep/basicBreakFlag` hooks.
+- [x] **DONE:** first successful `emcc` build (exit 0, no warnings) →
+      `basic.html` + `basic.js` + `basic.wasm`. `STARS.BAS` / `SIEVE.BAS` /
+      `GUESS.BAS` embedded into MEMFS.
+- [x] **DONE:** added `-fexceptions` after a hang was found — see the big
+      warning under the build command. Verified end-to-end with a scripted Node
+      harness (type a line, `RUN`, get output + `Ok` prompt, editor stays
+      responsive). This was the "hangs on RUN" bug.
+- [ ] **TODO:** visual in-browser smoke test (open `basic.html`, `RUN` STARS.BAS,
+      confirm blue screen / border / block cursor / colored glyphs / live keys).
+      Interpreter behavior under Asyncify is already proven via the Node harness;
+      this remaining check is purely the canvas/keyboard look-and-feel.
 
-> Nothing has been compiled to WASM yet. Until the `WasmScreen` backend and the
-> `#ifdef` guards exist, `emcc basic.cpp` will fail (it pulls in `<ncurses.h>`).
-> Do the code edits first, then run the build command below.
+> First `emcc` run is slow only because Emscripten generates & caches its system
+> libraries (libc/libc++/compiler-rt, ~100 s one-time). Re-builds are fast.
 
 ---
 
@@ -67,14 +83,33 @@ pushd C:\basic
 :: pushd \\wsl$\Ubuntu\home\gdevic\tmp\basic
 
 :: 3. Compile to basic.html + basic.js + basic.wasm
+::    (.BAS files are baked into MEMFS so SAVE/LOAD/FILES/RUN can see them)
 emcc basic.cpp -std=c++17 -O2 ^
+  -fexceptions ^
   -sASYNCIFY ^
   -sALLOW_MEMORY_GROWTH=1 ^
   -sEXPORTED_RUNTIME_METHODS=ccall,cwrap ^
   -sEXPORTED_FUNCTIONS=_main,_malloc,_free ^
+  --embed-file STARS.BAS --embed-file SIEVE.BAS --embed-file GUESS.BAS ^
   --shell-file shell.html ^
   -o basic.html
 ```
+
+> **`-fexceptions` is REQUIRED — do not drop it.** Emscripten disables C++
+> exception *catching* by default (`DISABLE_EXCEPTION_CATCHING=1`). The
+> interpreter's whole control flow is exception-driven (`BasicError`,
+> `EndSignal`, `BreakSignal`, `StopSignal`). Without `-fexceptions`, the first
+> `throw` — e.g. the `EndSignal` raised when a program finishes — is never
+> caught, the call aborts, the Asyncify suspend/resume chain breaks, and the
+> editor's next `waitKey()` never resumes: the page **hangs the instant you
+> `RUN` anything**. Symptom verified and fixed 2026-06-18. (`-fwasm-exceptions`
+> is faster but was not validated against Asyncify here; stick with
+> `-fexceptions`.)
+
+> Note: on this machine `emcc` is also reachable from Git Bash
+> (`/c/emsdk/upstream/emscripten/emcc`) and builds fine there — the earlier
+> "clang not found" WSL failure does not apply to the Git Bash shell, which sees
+> `clang.exe`/`node` on PATH. The build above was produced that way.
 
 Notes on the flags:
 - `-sASYNCIFY` — **essential.** The interpreter is written as a synchronous

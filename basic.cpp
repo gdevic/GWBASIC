@@ -14,8 +14,12 @@
 // Hardware graphics/sound/port statements raise "Advanced feature" (err 73).
 // ============================================================================
 
+#ifndef __EMSCRIPTEN__
 #define NCURSES_NOMACROS 1   // keep clear()/move()/refresh() as functions only
 #include <ncurses.h>
+#else
+#include <emscripten.h>      // EM_JS / EM_ASYNC_JS / emscripten_sleep for WASM
+#endif
 
 #include <algorithm>
 #include <array>
@@ -736,6 +740,7 @@ struct Screen {
 // logical lines can be stitched back together.
 // ---------------------------------------------------------------------------
 
+#ifndef __EMSCRIPTEN__
 struct CursesScreen : Screen {
     int H = 24, W = 80;
     int fg = 7, bg = 0;
@@ -1014,6 +1019,259 @@ struct CursesScreen : Screen {
     void beepNow() override { beep(); }
     void setCursorVisible(bool v) override { curs_set(v ? 1 : 0); }
 };
+#endif // !__EMSCRIPTEN__  (CursesScreen)
+
+#ifdef __EMSCRIPTEN__
+// ---------------------------------------------------------------------------
+// WasmScreen: browser backend.  Mirrors CursesScreen's shadow buffers exactly
+// (so the C64-style editor re-reads the screen identically) but renders the
+// fixed 80x25 grid to a <canvas> via JS and reads keys from a JS-side queue.
+// Blocking waits bridge to JS Promises through Asyncify (EM_ASYNC_JS).
+// ---------------------------------------------------------------------------
+
+// Hand the current frame to the page renderer (defined in shell.html).
+EM_JS(void, js_present,
+      (const uint8_t* chars, const uint8_t* attrs, int w, int h,
+       int cy, int cx, int curVis, int keyRow), {
+    if (typeof Module.basicPresent === 'function')
+        Module.basicPresent(HEAPU8.subarray(chars, (chars + (w * h))),
+                            HEAPU8.subarray(attrs, (attrs + (w * h))),
+                            w, h, cy, cx, curVis, keyRow);
+});
+
+// Non-blocking key fetch: packed (ch | (scan << 8)), or -1 when none queued.
+EM_JS(int, js_poll_key, (), {
+    return ((typeof Module.basicPollKey === 'function') ? Module.basicPollKey() : (-1));
+});
+
+// Blocking key fetch: awaits a JS Promise resolved when a key is queued.
+EM_ASYNC_JS(int, js_wait_key, (), {
+    return (await Module.basicWaitKey());
+});
+
+// Read-and-clear the Ctrl-C / Stop break flag set by the page.
+EM_JS(int, js_break_flag, (), {
+    var f = (Module.basicBreakFlag | 0);
+    Module.basicBreakFlag = 0;
+    return f;
+});
+
+EM_JS(void, js_beep, (), {
+    if (typeof Module.basicBeep === 'function') Module.basicBeep();
+});
+
+struct WasmScreen : Screen {
+    int H = 25, W = 80;                  // fixed C64-style grid
+    int fg = 7, bg = 0;
+    int viewTop = 1, viewBot = 25;       // VIEW PRINT scroll region (1-based)
+    bool keyRowOn = false;               // KEY ON reserves the bottom row
+    int cy = 0, cx = 0;                  // 0-based cursor (mirrors ncurses move)
+    bool cursorVis = true;
+    double lastYield = 0.0;              // throttle for the event-loop pump
+    std::vector<string> shadow;          // H rows of W bytes (original CP437 codes)
+    std::vector<string> attrSh;          // parallel color attributes (fg | bg<<4)
+    std::vector<char> wrapped;           // row continues previous row's logical line
+    std::deque<KeyEvent> pending;        // kept for interface parity (unused here)
+    std::vector<uint8_t> frameC, frameA; // contiguous buffers handed to JS
+
+    unsigned char curAttr() const {
+        return (unsigned char)((fg & 15) | ((bg & 7) << 4));
+    }
+
+    WasmScreen() {
+        widthLimit = 80;
+        viewTop = 1;
+        viewBot = H;
+        shadow.assign(H, string(W, ' '));
+        attrSh.assign(H, string(W, (char)7));
+        wrapped.assign(H, 0);
+        frameC.assign(size_t(W * H), 0);
+        frameA.assign(size_t(W * H), 0);
+        present();
+    }
+
+    // Move the cursor, clamping to the grid the way ncurses move() does.
+    void mv(int y, int x) {
+        cy = std::clamp(y, 0, (H - 1));
+        cx = std::clamp(x, 0, (W - 1));
+    }
+
+    int rows() override { return H; }
+    int cols() override { return widthLimit; }
+    int row() override { return (cy + 1); }
+    int col() override { return (cx + 1); }
+
+    // Flatten the shadow buffers and paint the whole grid (cheap at 80x25).
+    void present() {
+        for (int r = 0; r < H; r++)
+            for (int c = 0; c < W; c++) {
+                frameC[size_t((r * W) + c)] = (uint8_t)shadow[r][c];
+                frameA[size_t((r * W) + c)] = (uint8_t)attrSh[r][c];
+            }
+        js_present(frameC.data(), frameA.data(), W, H, cy, cx,
+                   (cursorVis ? 1 : 0), (keyRowOn ? 1 : 0));
+    }
+
+    void cls() override {
+        if ((viewTop == 1) && (viewBot == H)) {
+            for (auto& r : shadow) r.assign(W, ' ');
+            for (auto& r : attrSh) r.assign(W, (char)curAttr());
+            std::fill(wrapped.begin(), wrapped.end(), 0);
+            mv(0, 0);
+        } else {
+            for (int r = viewTop; r <= viewBot; r++) {
+                shadow[r - 1].assign(W, ' ');
+                attrSh[r - 1].assign(W, (char)curAttr());
+                wrapped[r - 1] = 0;
+            }
+            mv((viewTop - 1), 0);
+        }
+        present();
+    }
+
+    void setViewPrint(int t, int b) override {
+        int maxRow = (keyRowOn ? (H - 1) : H);
+        if (t <= 0) {
+            viewTop = 1;
+            viewBot = maxRow;
+        } else {
+            viewTop = std::min(t, maxRow);
+            viewBot = std::min(b, maxRow);
+        }
+        locate(viewTop, 1);
+    }
+
+    void setSoftKeys(const std::vector<string>* labels) override {
+        int sy = cy, sx = cx;
+        if (labels) {
+            keyRowOn = true;
+            if (viewBot == H) viewBot = (H - 1);
+            string rowtxt;
+            for (int i = 0; i < 10; i++) {
+                string vis = std::to_string(i + 1);
+                for (char c : (*labels)[i]) {
+                    if (vis.size() >= 7) break;
+                    vis += ((c == '\r') ? ' ' : c);
+                }
+                vis.resize(8, ' ');
+                rowtxt += vis;
+            }
+            rowtxt.resize(W, ' ');
+            for (int c = 1; c <= W; c++) putCell(H, c, (unsigned char)rowtxt[c - 1]);
+        } else {
+            keyRowOn = false;
+            if (viewBot == (H - 1)) viewBot = H;
+            for (int c = 1; c <= W; c++) putCell(H, c, ' ');
+        }
+        mv(sy, sx);
+        present();
+    }
+
+    void locate(int r, int c) override {
+        r = std::clamp(r, 1, H);
+        c = std::clamp(c, 1, W);
+        mv((r - 1), (c - 1));
+    }
+
+    void setColor(int f, int b) override {
+        fg = (f & 15);
+        bg = (b & 7);
+    }
+
+    void scrollUp() {                    // full-screen scroll (editor use)
+        shadow.erase(shadow.begin());
+        shadow.push_back(string(W, ' '));
+        attrSh.erase(attrSh.begin());
+        attrSh.push_back(string(W, (char)curAttr()));
+        wrapped.erase(wrapped.begin());
+        wrapped.push_back(0);
+    }
+
+    void scrollRegion() {
+        if ((viewTop == 1) && (viewBot == H)) {      // fast path: whole screen
+            scrollUp();
+            return;
+        }
+        for (int r = viewTop; r < viewBot; r++) {
+            shadow[r - 1] = shadow[r];
+            attrSh[r - 1] = attrSh[r];
+            wrapped[r - 1] = wrapped[r];
+        }
+        shadow[viewBot - 1].assign(W, ' ');
+        attrSh[viewBot - 1].assign(W, (char)curAttr());
+        wrapped[viewBot - 1] = 0;
+    }
+
+    void newline() override {
+        int y = row();
+        if (y >= viewBot) { scrollRegion(); mv((viewBot - 1), 0); }
+        else mv(y, 0);
+    }
+
+    void putByte(unsigned char b) override {
+        int y = (row() - 1), x = (col() - 1);
+        shadow[y][x] = (char)b;
+        attrSh[y][x] = (char)curAttr();
+        mv(y, std::min((x + 1), (W - 1)));
+        if ((x + 1) >= widthLimit) {                 // wrap to next row
+            if ((y + 1) >= viewBot) { scrollRegion(); y--; }
+            mv((y + 1), 0);
+            wrapped[y + 1] = 1;
+        }
+    }
+
+    // Overwrite a cell without moving the BASIC cursor (editor / soft keys).
+    void putCell(int r, int c, unsigned char b) {
+        if ((r < 1) || (r > H) || (c < 1) || (c > W)) return;
+        shadow[r - 1][c - 1] = (char)b;
+        attrSh[r - 1][c - 1] = (char)curAttr();
+    }
+
+    void flush() override { present(); }
+
+    unsigned char charAt(int r, int c) override {
+        if ((r < 1) || (r > H) || (c < 1) || (c > W)) return 32;
+        return (unsigned char)shadow[r - 1][c - 1];
+    }
+
+    unsigned char attrAt(int r, int c) override {
+        if ((r < 1) || (r > H) || (c < 1) || (c > W)) return 7;
+        return (unsigned char)attrSh[r - 1][c - 1];
+    }
+
+    // Unpack a JS key: ch in the low byte, scan code in the next byte.
+    KeyEvent unpack(int k) {
+        KeyEvent e;
+        if (k < 0) return e;
+        e.ch = (k & 0xFF);
+        e.scan = ((k >> 8) & 0xFF);
+        return e;
+    }
+
+    KeyEvent pollKey() override { return unpack(js_poll_key()); }
+
+    KeyEvent waitKey() override {
+        present();                                   // show latest frame, then block
+        return unpack(js_wait_key());
+    }
+
+    // Pump the browser event loop ~60x/s so the canvas repaints and keydown
+    // events enqueue; never on every statement, or tight FOR/NEXT loops crawl.
+    bool breakPending() override {
+        if (js_break_flag()) return true;
+        double now = emscripten_get_now();
+        if ((now - lastYield) >= 16.0) {
+            lastYield = now;
+            present();
+            emscripten_sleep(0);
+        }
+        return false;
+    }
+
+    void beepNow() override { js_beep(); }
+    void setCursorVisible(bool v) override { cursorVis = v; }
+};
+#endif // __EMSCRIPTEN__  (WasmScreen)
 
 // ---------------------------------------------------------------------------
 // PlainScreen: line-oriented stdio.  LOCATE/COLOR are tracked but invisible;
@@ -1070,6 +1328,15 @@ struct PlainScreen : Screen {
     }
     void beepNow() override { fputc('\a', stdout); }
 };
+
+// The concrete editor/full-screen backend for the active build.  Both
+// CursesScreen and WasmScreen expose the shadow buffers and fg/bg the editor
+// and COLOR need; PlainScreen does not (its dynamic_cast yields null).
+#ifdef __EMSCRIPTEN__
+using EditorScreen = WasmScreen;
+#else
+using EditorScreen = CursesScreen;
+#endif
 
 // ---------------------------------------------------------------------------
 // The interpreter.  The struct body spans several sections below; it holds
@@ -3283,7 +3550,7 @@ struct Basic {
                 if (!atStmtEnd()) evalExpr();          // border: ignored
             }
         }
-        CursesScreen* cs = dynamic_cast<CursesScreen*>(&scr);
+        EditorScreen* cs = dynamic_cast<EditorScreen*>(&scr);
         int curFg = cs ? cs->fg : 7, curBg = cs ? cs->bg : 0;
         scr.setColor(fg >= 0 ? (fg & 15) : curFg, bg >= 0 ? (bg & 7) : curBg);
     }
@@ -3960,6 +4227,9 @@ struct Basic {
         string cmd;
         if (!atStmtEnd()) cmd = evalStr();
         if (cmd.empty()) err(5);
+#ifdef __EMSCRIPTEN__
+        err(73);                         // no host shell in the browser
+#else
         CursesScreen* cs = dynamic_cast<CursesScreen*>(&scr);
         if (cs) {
             def_prog_mode();
@@ -3972,6 +4242,7 @@ struct Basic {
             int rc = system(cmd.c_str());
             (void)rc;
         }
+#endif
     }
 
     // =======================================================================
@@ -4451,12 +4722,14 @@ struct Basic {
 // stores it (when it starts with a line number) or executes it immediately.
 // ---------------------------------------------------------------------------
 
+// The editor reaches into backend-specific members (shadow/wrapped/H/W,
+// scrollUp/putCell), so it binds to EditorScreen (the concrete backend).
 struct Editor {
-    CursesScreen& scr;
+    EditorScreen& scr;
     Basic& b;
     bool insertMode = false;
 
-    Editor(CursesScreen& s, Basic& bb) : scr(s), b(bb) {}
+    Editor(EditorScreen& s, Basic& bb) : scr(s), b(bb) {}
 
     void banner() {
         scr.write("GW-BASIC style interpreter  (single-file C++ remake)\n");
@@ -4730,6 +5003,21 @@ int main(int argc, char** argv) {
         else if (!a.empty() && a[0] == '-') { usage(argv[0]); return 2; }
         else file = a;
     }
+#ifdef __EMSCRIPTEN__
+    (void)batch;                         // browser build: editor only, no -r
+    WasmScreen scr;
+    Basic b(scr, true);
+    if (!file.empty()) {
+        try {
+            b.loadProgramFile(file);
+        } catch (BasicError& e) {
+            scr.write(file + ": " + errMessage(e.code) + "\n");
+        }
+    }
+    Editor ed(scr, b);
+    ed.run();                            // Asyncify keeps the page responsive
+    return 0;
+#else
     signal(SIGINT, sigintHandler);
 
     if (batch) {
@@ -4771,4 +5059,5 @@ int main(int argc, char** argv) {
     Editor ed(scr, b);
     ed.run();
     return 0;
+#endif // !__EMSCRIPTEN__
 }

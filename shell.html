@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GW-BASIC (WASM)</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #2a2196;                 /* dark C64 blue surround */
+    color: #7C70DA;
+    font-family: "Courier New", monospace;
+  }
+  #wrap {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    min-height: 100%; gap: 8px; padding: 12px 0;
+    box-sizing: border-box;
+  }
+  #screen {
+    image-rendering: pixelated;
+    box-shadow: 0 0 0 6px #241c84, 0 8px 30px rgba(0,0,0,0.5);
+    border-radius: 6px;
+    outline: none;
+  }
+  #hint { font-size: 12px; opacity: 0.8; }
+  #hint b { color: #fff; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="screen" tabindex="0"></canvas>
+  <div id="hint">Click the screen, then type. <b>Ctrl-C</b> = Break.
+    Try <b>RUN</b> after the program loads.</div>
+</div>
+
+<script>
+// ===========================================================================
+// C64-style renderer + key bridge for the GW-BASIC WASM build.
+// The interpreter (basic.cpp / WasmScreen) calls the Module.basic* hooks below.
+// ===========================================================================
+
+// --- fixed grid + retro metrics -------------------------------------------
+const COLS = 80, ROWS = 25;
+const CELL_W = 11, CELL_H = 20;          // per-character cell, px
+const BORDER = 18;                       // C64-style border thickness, px
+
+// --- C64-flavored 16-color palette indexed by GW COLOR numbers -------------
+// Index 0 (black) is bent to C64 blue and 7 (white) to C64 light-blue so the
+// default screen reads as the classic blue-on-blue Commodore look.
+const PALETTE = [
+  '#3E31A2', // 0  -> C64 blue   (default background)
+  '#0000AA', // 1  blue
+  '#00AA00', // 2  green
+  '#00AAAA', // 3  cyan
+  '#AA0000', // 4  red
+  '#AA00AA', // 5  magenta
+  '#AA5500', // 6  brown
+  '#7C70DA', // 7  -> C64 light-blue (default text)
+  '#555555', // 8  dark grey
+  '#5555FF', // 9  light blue
+  '#55FF55', // 10 light green
+  '#55FFFF', // 11 light cyan
+  '#FF5555', // 12 light red
+  '#FF55FF', // 13 light magenta
+  '#FFFF55', // 14 yellow
+  '#FFFFFF'  // 15 white
+];
+const BORDER_COLOR = '#7C70DA';          // C64 light-blue frame
+
+// --- CP437 -> Unicode (mirrors the cp437[] table in basic.cpp) -------------
+const CP437_LO = [
+  0x0020,0x263A,0x263B,0x2665,0x2666,0x2663,0x2660,0x2022,
+  0x25D8,0x25CB,0x25D9,0x2642,0x2640,0x266A,0x266B,0x263C,
+  0x25BA,0x25C4,0x2195,0x203C,0x00B6,0x00A7,0x25AC,0x21A8,
+  0x2191,0x2193,0x2192,0x2190,0x221F,0x2194,0x25B2,0x25BC
+];
+const CP437_HI = [
+  0x00C7,0x00FC,0x00E9,0x00E2,0x00E4,0x00E0,0x00E5,0x00E7,
+  0x00EA,0x00EB,0x00E8,0x00EF,0x00EE,0x00EC,0x00C4,0x00C5,
+  0x00C9,0x00E6,0x00C6,0x00F4,0x00F6,0x00F2,0x00FB,0x00F9,
+  0x00FF,0x00D6,0x00DC,0x00A2,0x00A3,0x00A5,0x20A7,0x0192,
+  0x00E1,0x00ED,0x00F3,0x00FA,0x00F1,0x00D1,0x00AA,0x00BA,
+  0x00BF,0x2310,0x00AC,0x00BD,0x00BC,0x00A1,0x00AB,0x00BB,
+  0x2591,0x2592,0x2593,0x2502,0x2524,0x2561,0x2562,0x2556,
+  0x2555,0x2563,0x2551,0x2557,0x255D,0x255C,0x255B,0x2510,
+  0x2514,0x2534,0x252C,0x251C,0x2500,0x253C,0x255E,0x255F,
+  0x255A,0x2554,0x2569,0x2566,0x2560,0x2550,0x256C,0x2567,
+  0x2568,0x2564,0x2565,0x2559,0x2558,0x2552,0x2553,0x256B,
+  0x256A,0x2518,0x250C,0x2588,0x2584,0x258C,0x2590,0x2580,
+  0x03B1,0x00DF,0x0393,0x03C0,0x03A3,0x03C3,0x00B5,0x03C4,
+  0x03A6,0x0398,0x03A9,0x03B4,0x221E,0x03C6,0x03B5,0x2229,
+  0x2261,0x00B1,0x2265,0x2264,0x2320,0x2321,0x00F7,0x2248,
+  0x00B0,0x2219,0x00B7,0x221A,0x207F,0x00B2,0x25A0,0x00A0
+];
+const CP437 = new Uint16Array(256);
+for (let i = 0; i < 32; i++) CP437[i] = CP437_LO[i];
+for (let i = 32; i < 127; i++) CP437[i] = i;
+CP437[127] = 0x2302;
+for (let i = 128; i < 256; i++) CP437[i] = CP437_HI[i - 128];
+
+// --- canvas setup ----------------------------------------------------------
+const canvas = document.getElementById('screen');
+canvas.width  = (COLS * CELL_W) + (2 * BORDER);
+canvas.height = (ROWS * CELL_H) + (2 * BORDER);
+const ctx = canvas.getContext('2d');
+ctx.textBaseline = 'top';
+ctx.textAlign = 'left';
+ctx.font = (CELL_H - 4) + 'px "Consolas","DejaVu Sans Mono",monospace';
+
+// --- latest frame state (copied out of the wasm heap each present) ---------
+let lastChars = null, lastAttrs = null;
+let curRow = 0, curCol = 0, cursorVis = true;
+let blinkOn = true;
+
+function draw() {
+  if (!lastChars) return;
+  // Whole canvas = light-blue border; the inner grid paints its own cells.
+  ctx.fillStyle = BORDER_COLOR;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const idx = (r * COLS) + c;
+      const a = lastAttrs[idx];
+      const fg = (a & 15), bg = ((a >> 4) & 7);
+      const x = BORDER + (c * CELL_W), y = BORDER + (r * CELL_H);
+      ctx.fillStyle = PALETTE[bg];
+      ctx.fillRect(x, y, CELL_W, CELL_H);
+      const u = CP437[lastChars[idx]];
+      if (u !== 0x20) {
+        ctx.fillStyle = PALETTE[fg];
+        ctx.fillText(String.fromCharCode(u), x, y + 2);
+      }
+    }
+  }
+  // Solid blinking block cursor (inverse of the cell under it).
+  if (cursorVis && blinkOn &&
+      (curRow >= 0) && (curRow < ROWS) && (curCol >= 0) && (curCol < COLS)) {
+    const idx = (curRow * COLS) + curCol;
+    const a = lastAttrs[idx];
+    const fg = (a & 15), bg = ((a >> 4) & 7);
+    const x = BORDER + (curCol * CELL_W), y = BORDER + (curRow * CELL_H);
+    ctx.fillStyle = PALETTE[fg];
+    ctx.fillRect(x, y, CELL_W, CELL_H);
+    const u = CP437[lastChars[idx]];
+    if (u !== 0x20) {
+      ctx.fillStyle = PALETTE[bg];
+      ctx.fillText(String.fromCharCode(u), x, y + 2);
+    }
+  }
+}
+setInterval(function () { blinkOn = !blinkOn; draw(); }, 500);
+
+// --- key queue (drained by INKEY$/INPUT/editor through the Module hooks) ----
+const keyQueue = [];
+let waitResolver = null;
+function pushKey(packed) {
+  if (waitResolver) { const r = waitResolver; waitResolver = null; r(packed); }
+  else keyQueue.push(packed);
+}
+
+// Browser key -> packed GW key: ch | (scan << 8). Extended keys send ch 0.
+function keyToPacked(e) {
+  const ext = {
+    ArrowUp: 72, ArrowDown: 80, ArrowLeft: 75, ArrowRight: 77,
+    Home: 71, End: 79, PageUp: 73, PageDown: 81, Insert: 82, Delete: 83
+  };
+  if (e.key in ext) return (ext[e.key] << 8);
+  const fm = /^F([1-9]|10)$/.exec(e.key);
+  if (fm) return ((59 + (parseInt(fm[1], 10) - 1)) << 8);
+  if (e.key === 'Backspace') return 8;
+  if (e.key === 'Enter') return 13;
+  if (e.key === 'Tab') return 9;
+  if (e.key === 'Escape') return 27;
+  if (e.key.length === 1) {
+    let code = e.key.charCodeAt(0);
+    if (e.ctrlKey) {
+      const up = e.key.toUpperCase().charCodeAt(0);
+      if ((up >= 64) && (up <= 95)) code = (up & 0x1F);   // Ctrl-A..Ctrl-_
+    }
+    return (code <= 255) ? code : null;
+  }
+  return null;
+}
+
+document.addEventListener('keydown', function (e) {
+  // Ctrl-C: set the Break flag AND deliver CHR$(3), mirroring native Ctrl-C.
+  if (e.ctrlKey && ((e.key === 'c') || (e.key === 'C'))) {
+    Module.basicBreakFlag = 1;
+    pushKey(3);
+    e.preventDefault();
+    return;
+  }
+  const p = keyToPacked(e);
+  if (p === null) return;
+  pushKey(p);
+  // Stop keys that would scroll the page or navigate away.
+  if ((e.key.length > 1) || e.ctrlKey || (e.key === ' ')) e.preventDefault();
+});
+canvas.addEventListener('mousedown', function () { canvas.focus(); });
+
+// --- the Module the wasm runtime fills in; our hooks live on it -------------
+var Module = {
+  canvas: canvas,
+  basicBreakFlag: 0,
+  print: function (t) { console.log(t); },
+  printErr: function (t) { console.error(t); },
+
+  // WasmScreen::present -> paint the grid. Copy out of HEAPU8 (it can detach
+  // when the wasm heap grows), then draw.
+  basicPresent: function (chars, attrs, w, h, cy, cx, curVis, keyRow) {
+    lastChars = chars.slice();
+    lastAttrs = attrs.slice();
+    curRow = cy; curCol = cx; cursorVis = !!curVis;
+    draw();
+  },
+
+  // INKEY$ : next key or -1, non-blocking.
+  basicPollKey: function () { return keyQueue.length ? keyQueue.shift() : -1; },
+
+  // INPUT / INPUT$ / editor : resolves when a key is available (Asyncify await).
+  basicWaitKey: function () {
+    return new Promise(function (resolve) {
+      if (keyQueue.length) resolve(keyQueue.shift());
+      else waitResolver = resolve;
+    });
+  },
+
+  // BEEP / CHR$(7) : short WebAudio blip.
+  basicBeep: function () {
+    try {
+      const ac = Module._audio ||
+        (Module._audio = new (window.AudioContext || window.webkitAudioContext)());
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.value = 800;
+      g.gain.value = 0.05;
+      o.connect(g); g.connect(ac.destination);
+      o.start();
+      o.stop(ac.currentTime + 0.08);
+    } catch (_) { /* audio unavailable: ignore */ }
+  }
+};
+</script>
+
+{{{ SCRIPT }}}
+</body>
+</html>
