@@ -37,10 +37,18 @@ cannot be invoked from WSL — see "Toolchain" below).
       warning under the build command. Verified end-to-end with a scripted Node
       harness (type a line, `RUN`, get output + `Ok` prompt, editor stays
       responsive). This was the "hangs on RUN" bug.
+- [x] **DONE (2026-06-19):** fixed a hang on `LOAD` — the default 64 KB WASM
+      stack overflowed in the editor's `LOAD` → `std::ifstream` chain and trapped
+      as "memory access out of bounds." Added `-sSTACK_SIZE=5MB`; see the big
+      warning under the build command. Reproduced and verified headlessly with a
+      Node harness driving the real `basic.js`/`basic.wasm`: typing
+      `LOAD"STARS.BAS"` then `RUN` then a key now plots a star, traps the keypress
+      via `INKEY$`, and prints `GOODBYE!` / `Ok` with the editor back at the prompt.
 - [ ] **TODO:** visual in-browser smoke test (open `basic.html`, `RUN` STARS.BAS,
       confirm blue screen / border / block cursor / colored glyphs / live keys).
-      Interpreter behavior under Asyncify is already proven via the Node harness;
-      this remaining check is purely the canvas/keyboard look-and-feel.
+      Interpreter behavior under Asyncify — including `LOAD`+`RUN`+`INKEY$` — is
+      proven via the Node harness; this remaining check is purely the
+      canvas/keyboard look-and-feel.
 
 > First `emcc` run is slow only because Emscripten generates & caches its system
 > libraries (libc/libc++/compiler-rt, ~100 s one-time). Re-builds are fast.
@@ -88,12 +96,36 @@ emcc basic.cpp -std=c++17 -O2 ^
   -fexceptions ^
   -sASYNCIFY ^
   -sALLOW_MEMORY_GROWTH=1 ^
+  -sSTACK_SIZE=5MB ^
   -sEXPORTED_RUNTIME_METHODS=ccall,cwrap ^
   -sEXPORTED_FUNCTIONS=_main,_malloc,_free ^
   --embed-file STARS.BAS --embed-file SIEVE.BAS --embed-file GUESS.BAS ^
   --shell-file shell.html ^
   -o basic.html
 ```
+
+> **`-sSTACK_SIZE=5MB` is REQUIRED — do not drop it.** Recent Emscripten
+> defaults the WASM stack to **64 KB**, which this interpreter overruns. The
+> editor's `LOAD`/`MERGE` path runs a deep synchronous chain
+> (`Editor::run → waitKey → commitLine → handleLine → runDirect → execLoop →
+> statement → stmtLoad → loadProgramFile → mergeFromFile → std::ifstream/
+> getline`), and the C++ iostream frames tip it past 64 KB. In an `-O2` build
+> there is no stack-canary, so the overflow silently corrupts the heap and the
+> next access **traps with "memory access out of bounds."** In the browser the
+> trap is unhandled, the Asyncify suspend/resume chain dies, and the editor's
+> `waitKey()` never resumes: the page **hangs the instant you `LOAD` anything**
+> (`RUN` happened to fit under 64 KB, which is why it worked and `LOAD` didn't).
+> Symptom verified and fixed 2026-06-19. A roomy stack also covers deep BASIC
+> recursion (`DEF FN`, nested `GOSUB`, large expressions). To pinpoint a future
+> recurrence, rebuild with `-sASSERTIONS=2 -sSTACK_OVERFLOW_CHECK=2` and the
+> abort names the overflowing frame instead of trapping blindly.
+
+> Building from a mapped/network drive (e.g. `P:`)? `--embed-file STARS.BAS`
+> fails file_packager's "not contained within the current directory" check
+> there. Use the explicit `src@dst` form — `--embed-file STARS.BAS@STARS.BAS`
+> (likewise for `SIEVE.BAS`/`GUESS.BAS`) — which lands the file at the same
+> MEMFS root and sidesteps the check. Building from `C:\basic` or WSL, the
+> plain form works.
 
 > **`-fexceptions` is REQUIRED — do not drop it.** Emscripten disables C++
 > exception *catching* by default (`DISABLE_EXCEPTION_CATCHING=1`). The
