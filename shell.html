@@ -23,15 +23,19 @@
     border-radius: 6px;
     outline: none;
   }
-  #hint { font-size: 12px; opacity: 0.8; }
+  #hint { font-size: 12px; opacity: 0.85; line-height: 1.6;
+          max-width: 92vw; text-align: center; }
   #hint b { color: #fff; }
+  #hint a { color: #fff; text-decoration: underline; }
 </style>
 </head>
 <body>
 <div id="wrap">
   <canvas id="screen" tabindex="0"></canvas>
   <div id="hint">Click the screen, then type. <b>Ctrl-C</b> = Break.
-    Try <b>RUN</b> after the program loads.</div>
+    Load a sample with <b>LOAD"STARS.BAS"</b> then <b>RUN</b> &mdash; also
+    <b>SIEVE.BAS</b> and <b>GUESS.BAS</b> (type <b>FILES</b> to list them).
+    &nbsp;&middot;&nbsp; <a href="GUIDE.pdf" target="_blank" rel="noopener">User's guide (PDF)</a></div>
 </div>
 
 <script>
