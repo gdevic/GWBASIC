@@ -1,4 +1,4 @@
-# basic — a GW-BASIC style interpreter with a C64-style screen editor
+# GWBASIC — a GW-BASIC style interpreter with a C64-style screen editor
 
 > New here? **[GUIDE.md](GUIDE.md)** is the full user's guide — chapters on
 > the language, the editor, file I/O, and worked examples.
