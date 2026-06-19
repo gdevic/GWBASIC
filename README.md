@@ -1,5 +1,7 @@
 # GWBASIC — a GW-BASIC style interpreter with a C64-style screen editor
 
+**▶ [Live demo](https://baltazarstudios.com/experiments/GWBASIC/basic.html)** &nbsp;·&nbsp; **[Source on GitHub](https://github.com/gdevic/GWBASIC)**
+
 > New here? **[GUIDE.md](GUIDE.md)** is the full user's guide — chapters on
 > the language, the editor, file I/O, and worked examples.
 
@@ -9,7 +11,47 @@ did: the screen itself is the line buffer. Move the cursor anywhere, edit what
 you see, press Enter — if the line starts with a number it goes into the
 program, otherwise it executes immediately.
 
-## Build
+The same source file runs three ways: a native **ncurses** build, a headless
+**`-r`** mode for scripting and tests, and — compiled to **WebAssembly** with
+Emscripten — right in your browser. The Commodore-64-blue screen at the
+**[live demo](https://baltazarstudios.com/experiments/GWBASIC/basic.html)** above
+*is* that WASM build.
+
+---
+
+## Try it in your browser
+
+No install, nothing to build: **https://baltazarstudios.com/experiments/GWBASIC/basic.html**
+
+Click the screen and start typing (**Ctrl-C** = Break). The whole interpreter —
+editor, dialect, file I/O, all of it — is compiled to WebAssembly and runs
+**entirely client-side**: there is no backend, nothing is uploaded, and it keeps
+working offline once the page has loaded. The demo programs `STARS.BAS`,
+`SIEVE.BAS`, and `GUESS.BAS` are baked into the in-browser filesystem, so `FILES`
+lists them and you can `LOAD "STARS.BAS"` then `RUN` straight away.
+
+The look is deliberately retro — C64-blue background, a chunky border, and a
+solid blinking block cursor — painted to a `<canvas>` by `shell.html`, with the
+interpreter's CP437 box/block glyphs mapped through to Unicode so programs like
+STARS render properly. As in the native build, pixel graphics and hardware
+statements raise *Advanced Feature* (see *Intentional deviations*); everything
+text-mode works.
+
+To host it yourself, copy the three build artifacts — `basic.html`, `basic.js`,
+and `basic.wasm` — to any static file server (WASM can't load over `file://`, so
+it does need HTTP, not a local file open):
+
+```sh
+python -m http.server 8000      # then open http://localhost:8000/basic.html
+```
+
+Building those artifacts from source with Emscripten, and the architecture of the
+port (the `WasmScreen` backend, Asyncify, the key bridge), are documented in
+**[WASM.md](WASM.md)**.
+
+---
+
+## Build (native)
 
 ```sh
 make            # produces ./basic  (needs g++ and ncursesw)
